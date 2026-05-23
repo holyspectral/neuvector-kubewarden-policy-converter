@@ -1,39 +1,43 @@
 package processconverter
 
 import (
-	"errors"
-	"io"
+	"fmt"
 	"os"
 
-	yaml "go.yaml.in/yaml/v4"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/internalversion/scheme"
 )
 
 const maxRulePerYamlFile = 500
 
 func ReadNvSecurityRules(filepath string) ([]NvSecurityRule, error) {
 	var errs error
-	var loader *yaml.Loader
 	var ret []NvSecurityRule
-	f, err := os.Open(filepath)
+	// TODO: support streaming
+	data, err := os.ReadFile(filepath)
 	if err != nil {
 		return nil, err
 	}
-	loader, err = yaml.NewLoader(f)
+	decode := scheme.Codecs.UniversalDeserializer().Decode
+	corev1.AddToScheme(scheme.Scheme)
+
+	// TODO: Register scheme
+	obj, gvk, err := decode(data, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode item: %w", err)
 	}
 
-	for range maxRulePerYamlFile {
-		var rule NvSecurityRule
-		err = loader.Load(&rule)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			errs = errors.Join(errs, err)
-			continue
-		}
-		ret = append(ret, rule)
+	fmt.Printf("Loaded Kind: %s\n", gvk.Kind)
+
+	list, ok := obj.(*corev1.List)
+	if !ok {
+		panic("Object is not a corev1.List")
 	}
+
+	for _, item := range list.Items {
+		// Individual items are returned as runtime.RawExtension
+		fmt.Printf("Found item: %s\n", string(item.Raw))
+	}
+
 	return ret, errs
 }
