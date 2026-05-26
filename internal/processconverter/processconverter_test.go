@@ -1,12 +1,18 @@
 package processconverter_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/neuvector/neuvector-kubewarden-policy-converter/internal/processconverter"
 	nvv1 "github.com/neuvector/neuvector/controller/k8sapi/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 func TestReadNvSecurityRules(t *testing.T) {
@@ -259,6 +265,757 @@ func TestParseNvServiceName(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("ParseNvServiceName(%q, %q) = %q, want %q", tt.inputName, tt.namespace, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSearchContainerName(t *testing.T) {
+	tests := []struct {
+		name          string
+		workloadName  string
+		namespace     string
+		setupObjects  []runtime.Object
+		wantContainer string
+		wantKind      string
+		wantErr       bool
+		errContains   string
+	}{
+		{
+			name:         "deployment with single container",
+			workloadName: "myapp",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app-container"}),
+			},
+			wantContainer: "app-container",
+			wantKind:      "Deployment",
+			wantErr:       false,
+		},
+		{
+			name:         "daemonset with single container",
+			workloadName: "system-daemon",
+			namespace:    "kube-system",
+			setupObjects: []runtime.Object{
+				newUnstructuredDaemonSet("system-daemon", "kube-system", []string{"daemon"}),
+			},
+			wantContainer: "daemon",
+			wantKind:      "DaemonSet",
+			wantErr:       false,
+		},
+		{
+			name:         "statefulset with single container",
+			workloadName: "database",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredStatefulSet("database", "default", []string{"db"}),
+			},
+			wantContainer: "db",
+			wantKind:      "StatefulSet",
+			wantErr:       false,
+		},
+		{
+			name:         "replicaset with single container",
+			workloadName: "myapp-rs",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredReplicaSet("myapp-rs", "default", []string{"app"}),
+			},
+			wantContainer: "app",
+			wantKind:      "ReplicaSet",
+			wantErr:       false,
+		},
+		{
+			name:         "job with single container",
+			workloadName: "batch-job",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredJob("batch-job", "default", []string{"job-container"}),
+			},
+			wantContainer: "job-container",
+			wantKind:      "Job",
+			wantErr:       false,
+		},
+		{
+			name:         "cronjob with single container",
+			workloadName: "backup-job",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredCronJob("backup-job", "default", []string{"backup"}),
+			},
+			wantContainer: "backup",
+			wantKind:      "CronJob",
+			wantErr:       false,
+		},
+		{
+			name:         "pod with single container",
+			workloadName: "standalone-pod",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredPod("standalone-pod", "default", []string{"main"}),
+			},
+			wantContainer: "main",
+			wantKind:      "Pod",
+			wantErr:       false,
+		},
+		{
+			name:         "deployment with multiple containers",
+			workloadName: "myapp",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app", "sidecar"}),
+			},
+			wantErr:     true,
+			errContains: "multiple containers",
+		},
+		{
+			name:         "multiple workload types with same name",
+			workloadName: "myapp",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app"}),
+				newUnstructuredPod("myapp", "default", []string{"app"}),
+			},
+			wantErr:     true,
+			errContains: "multiple workloads found",
+		},
+		{
+			name:         "no workload found",
+			workloadName: "nonexistent",
+			namespace:    "default",
+			setupObjects: []runtime.Object{},
+			wantErr:      true,
+			errContains:  "no workload found",
+		},
+		{
+			name:         "deployment with three containers",
+			workloadName: "complex-app",
+			namespace:    "default",
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("complex-app", "default", []string{"app", "sidecar", "init"}),
+			},
+			wantErr:     true,
+			errContains: "multiple containers (3)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), tt.setupObjects...)
+			ctx := context.Background()
+
+			gotContainer, gotKind, err := processconverter.SearchContainerName(
+				ctx,
+				dynamicClient,
+				tt.workloadName,
+				tt.namespace,
+			)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("SearchContainerName() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr && tt.errContains != "" {
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf(
+						"SearchContainerName() error = %v, should contain %q",
+						err,
+						tt.errContains,
+					)
+				}
+			}
+
+			if !tt.wantErr {
+				if gotContainer != tt.wantContainer {
+					t.Errorf(
+						"SearchContainerName() containerName = %v, want %v",
+						gotContainer,
+						tt.wantContainer,
+					)
+				}
+				if gotKind != tt.wantKind {
+					t.Errorf(
+						"SearchContainerName() kind = %v, want %v",
+						gotKind,
+						tt.wantKind,
+					)
+				}
+			}
+		})
+	}
+}
+
+// Helper functions to create unstructured objects for testing
+
+func newUnstructuredDeployment(name, namespace string, containerNames []string) *unstructured.Unstructured {
+	containers := make([]interface{}, len(containerNames))
+	for i, cn := range containerNames {
+		containers[i] = map[string]interface{}{"name": cn}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"containers": containers,
+					},
+				},
+			},
+		},
+	}
+}
+
+func newUnstructuredDaemonSet(name, namespace string, containerNames []string) *unstructured.Unstructured {
+	containers := make([]interface{}, len(containerNames))
+	for i, cn := range containerNames {
+		containers[i] = map[string]interface{}{"name": cn}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"containers": containers,
+					},
+				},
+			},
+		},
+	}
+}
+
+func newUnstructuredStatefulSet(name, namespace string, containerNames []string) *unstructured.Unstructured {
+	containers := make([]interface{}, len(containerNames))
+	for i, cn := range containerNames {
+		containers[i] = map[string]interface{}{"name": cn}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "StatefulSet",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"containers": containers,
+					},
+				},
+			},
+		},
+	}
+}
+
+func newUnstructuredReplicaSet(name, namespace string, containerNames []string) *unstructured.Unstructured {
+	containers := make([]interface{}, len(containerNames))
+	for i, cn := range containerNames {
+		containers[i] = map[string]interface{}{"name": cn}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "ReplicaSet",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"containers": containers,
+					},
+				},
+			},
+		},
+	}
+}
+
+func newUnstructuredJob(name, namespace string, containerNames []string) *unstructured.Unstructured {
+	containers := make([]interface{}, len(containerNames))
+	for i, cn := range containerNames {
+		containers[i] = map[string]interface{}{"name": cn}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "batch/v1",
+			"kind":       "Job",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"containers": containers,
+					},
+				},
+			},
+		},
+	}
+}
+
+func newUnstructuredCronJob(name, namespace string, containerNames []string) *unstructured.Unstructured {
+	containers := make([]interface{}, len(containerNames))
+	for i, cn := range containerNames {
+		containers[i] = map[string]interface{}{"name": cn}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "batch/v1",
+			"kind":       "CronJob",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"jobTemplate": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"template": map[string]interface{}{
+							"spec": map[string]interface{}{
+								"containers": containers,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func newUnstructuredPod(name, namespace string, containerNames []string) *unstructured.Unstructured {
+	containers := make([]interface{}, len(containerNames))
+	for i, cn := range containerNames {
+		containers[i] = map[string]interface{}{"name": cn}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"containers": containers,
+			},
+		},
+	}
+}
+
+// newNvSecurityRule creates a test NvSecurityRule with the given parameters
+func newNvSecurityRule(name, namespace, serviceName string, processRules []nvv1.NvSecurityProcessRule) *nvv1.NvSecurityRule {
+	baseline := "zero-drift"
+	mode := "Discover"
+
+	return &nvv1.NvSecurityRule{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: nvv1.NvSecurityRuleSpec{
+			Target: nvv1.NvSecurityTarget{
+				Selector: nvv1.GroupConfig{
+					Name: name,
+					Criteria: []nvv1.CriteriaEntry{
+						{
+							Key:   "service",
+							Op:    "=",
+							Value: serviceName,
+						},
+						{
+							Key:   "domain",
+							Op:    "=",
+							Value: namespace,
+						},
+					},
+				},
+			},
+			ProcessRule: processRules,
+			ProcessProfile: &nvv1.NvSecurityProcessProfile{
+				Baseline: &baseline,
+				Mode:     &mode,
+			},
+		},
+	}
+}
+
+func TestNvSecurityRuleToWorkloadPolicy(t *testing.T) {
+	tests := []struct {
+		name             string
+		nvRule           *nvv1.NvSecurityRule
+		setupObjects     []runtime.Object
+		wantErr          bool
+		errContains      string
+		wantWorkloadKind string
+		wantWorkloadName string
+		validatePolicy   func(*testing.T, *nvv1.NvSecurityRule, string)
+	}{
+		{
+			name: "successful conversion with deployment",
+			nvRule: newNvSecurityRule(
+				"nv.myapp.default",
+				"default",
+				"myapp.default",
+				[]nvv1.NvSecurityProcessRule{
+					{
+						Name:   "bash",
+						Path:   "/bin/bash",
+						Action: "allow",
+					},
+					{
+						Name:   "ls",
+						Path:   "/bin/ls",
+						Action: "allow",
+					},
+				},
+			),
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app-container"}),
+			},
+			wantErr:          false,
+			wantWorkloadKind: "Deployment",
+			wantWorkloadName: "myapp",
+			validatePolicy: func(t *testing.T, nvRule *nvv1.NvSecurityRule, containerName string) {
+				// Additional validation can be done here
+			},
+		},
+		{
+			name: "successful conversion with daemonset",
+			nvRule: newNvSecurityRule(
+				"nv.kube-proxy.kube-system",
+				"kube-system",
+				"kube-proxy.kube-system",
+				[]nvv1.NvSecurityProcessRule{
+					{
+						Name:   "kube-proxy",
+						Path:   "/usr/local/bin/kube-proxy",
+						Action: "allow",
+					},
+				},
+			),
+			setupObjects: []runtime.Object{
+				newUnstructuredDaemonSet("kube-proxy", "kube-system", []string{"kube-proxy"}),
+			},
+			wantErr:          false,
+			wantWorkloadKind: "DaemonSet",
+			wantWorkloadName: "kube-proxy",
+		},
+		{
+			name: "invalid security rule - service value matches rule name",
+			nvRule: &nvv1.NvSecurityRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "nv.myapp.default",
+					Namespace: "default",
+				},
+				Spec: nvv1.NvSecurityRuleSpec{
+					Target: nvv1.NvSecurityTarget{
+						Selector: nvv1.GroupConfig{
+							Name: "nv.myapp.default",
+							Criteria: []nvv1.CriteriaEntry{
+								{
+									Key:   "service",
+									Op:    "=",
+									Value: "nv.myapp.default",
+								},
+							},
+						},
+					},
+					ProcessRule: []nvv1.NvSecurityProcessRule{
+						{
+							Name:   "bash",
+							Path:   "/bin/bash",
+							Action: "allow",
+						},
+					},
+				},
+			},
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app"}),
+			},
+			wantErr:     true,
+			errContains: "no service is defined in criteria",
+		},
+		{
+			name: "invalid security rule - non-allow action",
+			nvRule: newNvSecurityRule(
+				"nv.myapp.default",
+				"default",
+				"myapp.default",
+				[]nvv1.NvSecurityProcessRule{
+					{
+						Name:   "bash",
+						Path:   "/bin/bash",
+						Action: "deny",
+					},
+				},
+			),
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app"}),
+			},
+			wantErr:     true,
+			errContains: "invalid action is detected",
+		},
+		{
+			name: "invalid security rule - non-default process name",
+			nvRule: newNvSecurityRule(
+				"nv.myapp.default",
+				"default",
+				"myapp.default",
+				[]nvv1.NvSecurityProcessRule{
+					{
+						Name:   "custom-name",
+						Path:   "/bin/bash",
+						Action: "allow",
+					},
+				},
+			),
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app"}),
+			},
+			wantErr:     true,
+			errContains: "non-default process name is detected",
+		},
+		{
+			name: "invalid service name - missing nv prefix",
+			nvRule: &nvv1.NvSecurityRule{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "myapp.default",
+					Namespace: "default",
+				},
+				Spec: nvv1.NvSecurityRuleSpec{
+					Target: nvv1.NvSecurityTarget{
+						Selector: nvv1.GroupConfig{
+							Name: "myapp.default",
+							Criteria: []nvv1.CriteriaEntry{
+								{
+									Key:   "service",
+									Op:    "=",
+									Value: "different.default",
+								},
+							},
+						},
+					},
+					ProcessRule: []nvv1.NvSecurityProcessRule{
+						{
+							Name:   "bash",
+							Path:   "/bin/bash",
+							Action: "allow",
+						},
+					},
+				},
+			},
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app"}),
+			},
+			wantErr:     true,
+			errContains: "doesn't have 'nv.' prefix",
+		},
+		{
+			name: "workload not found",
+			nvRule: newNvSecurityRule(
+				"nv.nonexistent.default",
+				"default",
+				"nonexistent.default",
+				[]nvv1.NvSecurityProcessRule{
+					{
+						Name:   "bash",
+						Path:   "/bin/bash",
+						Action: "allow",
+					},
+				},
+			),
+			setupObjects: []runtime.Object{},
+			wantErr:      true,
+			errContains:  "no workload found",
+		},
+		{
+			name: "workload with multiple containers",
+			nvRule: newNvSecurityRule(
+				"nv.myapp.default",
+				"default",
+				"myapp.default",
+				[]nvv1.NvSecurityProcessRule{
+					{
+						Name:   "bash",
+						Path:   "/bin/bash",
+						Action: "allow",
+					},
+				},
+			),
+			setupObjects: []runtime.Object{
+				newUnstructuredDeployment("myapp", "default", []string{"app", "sidecar"}),
+			},
+			wantErr:     true,
+			errContains: "multiple containers",
+		},
+		{
+			name: "successful conversion with statefulset",
+			nvRule: newNvSecurityRule(
+				"nv.database.production",
+				"production",
+				"database.production",
+				[]nvv1.NvSecurityProcessRule{
+					{
+						Name:   "postgres",
+						Path:   "/usr/bin/postgres",
+						Action: "allow",
+					},
+					{
+						Name:   "pg_ctl",
+						Path:   "/usr/bin/pg_ctl",
+						Action: "allow",
+					},
+				},
+			),
+			setupObjects: []runtime.Object{
+				newUnstructuredStatefulSet("database", "production", []string{"postgres"}),
+			},
+			wantErr:          false,
+			wantWorkloadKind: "StatefulSet",
+			wantWorkloadName: "database",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), tt.setupObjects...)
+			ctx := context.Background()
+
+			policy, workloadKind, workloadName, err := processconverter.NvSecurityRuleToWorkloadPolicy(
+				ctx,
+				dynamicClient,
+				tt.nvRule,
+			)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("NvSecurityRuleToWorkloadPolicy() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr && tt.errContains != "" {
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf(
+						"NvSecurityRuleToWorkloadPolicy() error = %v, should contain %q",
+						err,
+						tt.errContains,
+					)
+				}
+				return
+			}
+
+			if !tt.wantErr {
+				// Validate successful conversion
+				if policy == nil {
+					t.Error("NvSecurityRuleToWorkloadPolicy() returned nil policy")
+					return
+				}
+
+				if workloadKind != tt.wantWorkloadKind {
+					t.Errorf(
+						"NvSecurityRuleToWorkloadPolicy() workloadKind = %v, want %v",
+						workloadKind,
+						tt.wantWorkloadKind,
+					)
+				}
+
+				if workloadName != tt.wantWorkloadName {
+					t.Errorf(
+						"NvSecurityRuleToWorkloadPolicy() workloadName = %v, want %v",
+						workloadName,
+						tt.wantWorkloadName,
+					)
+				}
+
+				// Validate policy metadata
+				if policy.Name != tt.nvRule.Name {
+					t.Errorf(
+						"WorkloadPolicy.Name = %v, want %v",
+						policy.Name,
+						tt.nvRule.Name,
+					)
+				}
+
+				if policy.Namespace != tt.nvRule.Namespace {
+					t.Errorf(
+						"WorkloadPolicy.Namespace = %v, want %v",
+						policy.Namespace,
+						tt.nvRule.Namespace,
+					)
+				}
+
+				// Validate policy spec
+				if policy.Spec.Mode != "monitor" {
+					t.Errorf("WorkloadPolicy.Spec.Mode = %v, want 'monitor'", policy.Spec.Mode)
+				}
+
+				// Validate rules by container exists
+				if len(policy.Spec.RulesByContainer) == 0 {
+					t.Error("WorkloadPolicy.Spec.RulesByContainer is empty")
+					return
+				}
+
+				// Get the container name from the first entry
+				var containerName string
+				for cn := range policy.Spec.RulesByContainer {
+					containerName = cn
+					break
+				}
+
+				rules := policy.Spec.RulesByContainer[containerName]
+				if rules == nil {
+					t.Errorf("WorkloadPolicy rules for container %q is nil", containerName)
+					return
+				}
+
+				// Validate executables match process rules
+				if len(rules.Executables.Allowed) != len(tt.nvRule.Spec.ProcessRule) {
+					t.Errorf(
+						"WorkloadPolicy has %d allowed executables, want %d",
+						len(rules.Executables.Allowed),
+						len(tt.nvRule.Spec.ProcessRule),
+					)
+				}
+
+				// Validate each executable path
+				for i, processRule := range tt.nvRule.Spec.ProcessRule {
+					if i >= len(rules.Executables.Allowed) {
+						break
+					}
+					if rules.Executables.Allowed[i] != processRule.Path {
+						t.Errorf(
+							"Executable[%d] = %v, want %v",
+							i,
+							rules.Executables.Allowed[i],
+							processRule.Path,
+						)
+					}
+				}
+
+				// Run custom validation if provided
+				if tt.validatePolicy != nil {
+					tt.validatePolicy(t, tt.nvRule, containerName)
+				}
 			}
 		})
 	}
