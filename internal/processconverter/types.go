@@ -1,10 +1,6 @@
 package processconverter
 
-import (
-	"github.com/neuvector/neuvector/controller/api"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
+/*
 // TODO: consider getting definition from NV.  (IT COULD BE A BIG IMPORT!!)
 
 type NvSecurityProcessProfile struct {
@@ -43,3 +39,4 @@ type NvSecurityRuleList struct {
 
 	Items []NvSecurityRule `json:"items"`
 }
+*/

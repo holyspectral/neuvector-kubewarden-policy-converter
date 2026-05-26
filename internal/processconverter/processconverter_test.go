@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/neuvector/neuvector-kubewarden-policy-converter/internal/processconverter"
+	nvv1 "github.com/neuvector/neuvector/controller/k8sapi/v1"
 )
 
 func TestReadNvSecurityRules(t *testing.T) {
@@ -21,7 +22,14 @@ func TestReadNvSecurityRules(t *testing.T) {
 			filepath:    "testdata/simple.yaml",
 			wantErr:     false,
 			wantCount:   1,
-			description: "should successfully read a valid NvSecurityRule from simple.yaml",
+			description: "should successfully read a valid NvSecurityRuleList exported from NeuVector",
+		},
+		{
+			name:        "valid simple yaml",
+			filepath:    "testdata/simple-crd.yaml",
+			wantErr:     false,
+			wantCount:   1,
+			description: "should successfully read a valid NvSecurityRule CRD",
 		},
 		{
 			name:        "non-existent file",
@@ -67,8 +75,8 @@ func TestReadNvSecurityRules(t *testing.T) {
 	}
 }
 
-// validateSimpleYamlRule validates the structure of a rule loaded from simple.yaml
-func validateSimpleYamlRule(t *testing.T, rule processconverter.NvSecurityRule) {
+// validateSimpleYamlRule validates the structure of a rule loaded from simple.yaml.
+func validateSimpleYamlRule(t *testing.T, rule *nvv1.NvSecurityRule) {
 	t.Helper()
 
 	// Validate metadata
@@ -118,5 +126,140 @@ func validateSimpleYamlRule(t *testing.T, rule processconverter.NvSecurityRule) 
 	// Validate target
 	if rule.Spec.Target.Selector.Name != "nv.kube-proxy.kube-system" {
 		t.Errorf("expected target selector name 'nv.kube-proxy.kube-system', got '%s'", rule.Spec.Target.Selector.Name)
+	}
+}
+
+func TestParseNvServiceName(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputName string
+		namespace string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "name with nv prefix and namespace suffix",
+			inputName: "nv.kube-proxy.kube-system",
+			namespace: "kube-system",
+			want:      "kube-proxy",
+			wantErr:   false,
+		},
+		{
+			name:      "complex service name",
+			inputName: "nv.my-app-service.production",
+			namespace: "production",
+			want:      "my-app-service",
+			wantErr:   false,
+		},
+		{
+			name:      "minimal valid name",
+			inputName: "nv.service.ns",
+			namespace: "ns",
+			want:      "service",
+			wantErr:   false,
+		},
+		{
+			name:      "missing nv prefix",
+			inputName: "my-service.default",
+			namespace: "default",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "missing namespace suffix",
+			inputName: "nv.my-service",
+			namespace: "default",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "wrong namespace suffix",
+			inputName: "nv.my-service.prod",
+			namespace: "staging",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "empty name",
+			inputName: "",
+			namespace: "default",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "only nv prefix with empty namespace - empty workload",
+			inputName: "nv.",
+			namespace: "",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "service name equals namespace",
+			inputName: "nv.default.default",
+			namespace: "default",
+			want:      "default",
+			wantErr:   false,
+		},
+		{
+			name:      "not recommended service name with dot",
+			inputName: "nv.default.default.default.namespace",
+			namespace: "namespace",
+			want:      "default.default.default",
+			wantErr:   false,
+		},
+		{
+			name:      "workload name is only dots - not empty after trim",
+			inputName: "nv...namespace",
+			namespace: "namespace",
+			want:      ".",
+			wantErr:   false,
+		},
+		{
+			name:      "empty workload after trim - whitespace only",
+			inputName: "nv.   .default",
+			namespace: "default",
+			want:      "",
+			wantErr:   true,
+		},
+		{
+			name:      "workload name with leading/trailing spaces",
+			inputName: "nv. service .namespace",
+			namespace: "namespace",
+			want:      "service",
+			wantErr:   false,
+		},
+		{
+			name:      "workload with leading dot after prefix removal",
+			inputName: "nv..kube-system.kube-system",
+			namespace: "kube-system",
+			want:      ".kube-system",
+			wantErr:   false,
+		},
+		{
+			name:      "exact pattern nv.<namespace>.<namespace> results in namespace name",
+			inputName: "nv.ns.ns",
+			namespace: "ns",
+			want:      "ns",
+			wantErr:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := processconverter.ParseNvServiceName(tt.inputName, tt.namespace)
+			if (err != nil) != tt.wantErr {
+				t.Errorf(
+					"ParseNvServiceName(%q, %q) error = %v, wantErr %v",
+					tt.inputName,
+					tt.namespace,
+					err,
+					tt.wantErr,
+				)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ParseNvServiceName(%q, %q) = %q, want %q", tt.inputName, tt.namespace, got, tt.want)
+			}
+		})
 	}
 }
